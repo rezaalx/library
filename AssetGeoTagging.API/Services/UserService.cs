@@ -12,6 +12,8 @@ using Olameter.Sdi.Assetgeotagging.V1;
 using UserModel = AssetGeoTagging.Model.User;
 using UserGroupModel = AssetGeoTagging.Model.UserGroup;
 using UserRoleModel = AssetGeoTagging.Model.UserRole;
+using UserGroupUserModel = AssetGeoTagging.Model.UserGroupUser;
+using UserRoleUserModel = AssetGeoTagging.Model.UserRoleUser;
 using UserDto = Olameter.Sdi.Assetgeotagging.V1.User;
 using UserGroupDto = Olameter.Sdi.Assetgeotagging.V1.UserGroup;
 using UserRoleDto = Olameter.Sdi.Assetgeotagging.V1.UserRole;
@@ -59,10 +61,12 @@ namespace AssetGeoTagging.API.Services
                 UpdatedBy = model.UpdatedBy ?? string.Empty
             };
 
-            if (model.UserRoles != null)
+            if (model.userRoleUsers != null)
             {
-                foreach (var role in model.UserRoles)
+                foreach (var roleJoin in model.userRoleUsers)
                 {
+                    var role = roleJoin?.UserRole;
+                    if (role == null) continue;
                     dto.UserRoles.Add(new UserRoleDto
                     {
                         Name = role.Name,
@@ -72,10 +76,12 @@ namespace AssetGeoTagging.API.Services
                 }
             }
 
-            if (model.UserGroups != null)
+            if (model.userGroupUsers != null)
             {
-                foreach (var group in model.UserGroups)
+                foreach (var groupJoin in model.userGroupUsers)
                 {
+                    var group = groupJoin?.UserGroup;
+                    if (group == null) continue;
                     dto.UserGroups.Add(new UserGroupDto
                     {
                         Name = group.Name,
@@ -105,89 +111,98 @@ namespace AssetGeoTagging.API.Services
         private async Task ReplaceUserGroupsAsync(UserModel user, IEnumerable<UserGroupDto> groups)
         {
             // Ensure collections are loaded
-            if (user.UserGroups == null)
+            if (user.userGroupUsers == null)
             {
-                user.UserGroups = new List<UserGroupModel>();
+                user.userGroupUsers = new List<UserGroupUserModel>();
             }
 
-            var incomingByName = (groups ?? Enumerable.Empty<UserGroupDto>())
-                .Where(g => !string.IsNullOrWhiteSpace(g.Name))
-                .ToDictionary(g => g.Name, g => g);
+            var incomingNames = new HashSet<string>(
+                (groups ?? Enumerable.Empty<UserGroupDto>())
+                    .Where(g => !string.IsNullOrWhiteSpace(g.Name))
+                    .Select(g => g.Name)
+            );
 
-            // Remove groups not present anymore
-            var toRemove = user.UserGroups.Where(g => !incomingByName.ContainsKey(g.Name)).ToList();
-            foreach (var g in toRemove)
+            // Remove joins that are not present anymore
+            var joinsToRemove = user.userGroupUsers
+                .Where(j => j.UserGroup != null && !incomingNames.Contains(j.UserGroup.Name))
+                .ToList();
+            foreach (var j in joinsToRemove)
             {
-                user.UserGroups.Remove(g);
+                user.userGroupUsers.Remove(j);
+                _context.Set<UserGroupUserModel>().Remove(j);
             }
 
-            // Upsert existing and add new
-            foreach (var kv in incomingByName)
+            // Ensure joins for incoming groups
+            foreach (var name in incomingNames)
             {
-                var incoming = kv.Value;
-                var existing = user.UserGroups.FirstOrDefault(g => g.Name == incoming.Name);
-                if (existing == null)
+                var existingJoin = user.userGroupUsers.FirstOrDefault(j => j.UserGroup != null && j.UserGroup.Name == name);
+                if (existingJoin != null) continue;
+
+                var groupEntity = await _context.Set<UserGroupModel>().FirstOrDefaultAsync(g => g.Name == name);
+                if (groupEntity == null)
                 {
-                    // Try to find existing group in DB by name to attach
-                    existing = await _context.Set<UserGroupModel>().FirstOrDefaultAsync(g => g.Name == incoming.Name);
-                    if (existing == null)
+                    groupEntity = new UserGroupModel
                     {
-                        existing = new UserGroupModel
-                        {
-                            Name = string.IsNullOrWhiteSpace(incoming.Name) ? GenerateName(new UserGroupModel().DefaultResourceIdentifier) : incoming.Name,
-                            CreatedOn = DateTime.UtcNow
-                        };
-                    }
-
-                    user.UserGroups.Add(existing);
+                        Name = name,
+                        CreatedOn = DateTime.UtcNow
+                    };
+                    await _context.Set<UserGroupModel>().AddAsync(groupEntity);
                 }
 
-                existing.UserGroupName = incoming.UserGroupName ?? existing.UserGroupName;
-                existing.Description = incoming.Description ?? existing.Description;
-                existing.Status = StatusBoolToString(incoming.Status);
-                existing.UpdatedBy = incoming.UpdatedBy ?? existing.UpdatedBy;
-                existing.UpdatedOn = DateTime.UtcNow;
-                existing.User = user;
+                var join = new UserGroupUserModel
+                {
+                    Name = GenerateName(new UserGroupUserModel().DefaultResourceIdentifier),
+                    User = user,
+                    UserGroup = groupEntity
+                };
+                user.userGroupUsers.Add(join);
             }
         }
 
         private async Task ReplaceUserRolesAsync(UserModel user, IEnumerable<UserRoleDto> roles)
         {
-            if (user.UserRoles == null)
+            if (user.userRoleUsers == null)
             {
-                user.UserRoles = new List<UserRoleModel>();
+                user.userRoleUsers = new List<UserRoleUserModel>();
             }
 
-            var incomingByName = (roles ?? Enumerable.Empty<UserRoleDto>())
-                .Where(r => !string.IsNullOrWhiteSpace(r.Name))
-                .ToDictionary(r => r.Name, r => r);
+            var incomingNames = new HashSet<string>(
+                (roles ?? Enumerable.Empty<UserRoleDto>())
+                    .Where(r => !string.IsNullOrWhiteSpace(r.Name))
+                    .Select(r => r.Name)
+            );
 
-            var toRemove = user.UserRoles.Where(r => !incomingByName.ContainsKey(r.Name)).ToList();
-            foreach (var r in toRemove)
+            var joinsToRemove = user.userRoleUsers
+                .Where(j => j.UserRole != null && !incomingNames.Contains(j.UserRole.Name))
+                .ToList();
+            foreach (var j in joinsToRemove)
             {
-                user.UserRoles.Remove(r);
+                user.userRoleUsers.Remove(j);
+                _context.Set<UserRoleUserModel>().Remove(j);
             }
 
-            foreach (var kv in incomingByName)
+            foreach (var name in incomingNames)
             {
-                var incoming = kv.Value;
-                var existing = user.UserRoles.FirstOrDefault(r => r.Name == incoming.Name);
-                if (existing == null)
+                var existingJoin = user.userRoleUsers.FirstOrDefault(j => j.UserRole != null && j.UserRole.Name == name);
+                if (existingJoin != null) continue;
+
+                var roleEntity = await _context.Set<UserRoleModel>().FirstOrDefaultAsync(r => r.Name == name);
+                if (roleEntity == null)
                 {
-                    existing = await _context.Set<UserRoleModel>().FirstOrDefaultAsync(r => r.Name == incoming.Name);
-                    if (existing == null)
+                    roleEntity = new UserRoleModel
                     {
-                        existing = new UserRoleModel
-                        {
-                            Name = string.IsNullOrWhiteSpace(incoming.Name) ? GenerateName(new UserRoleModel().DefaultResourceIdentifier) : incoming.Name
-                        };
-                    }
-                    user.UserRoles.Add(existing);
+                        Name = name
+                    };
+                    await _context.Set<UserRoleModel>().AddAsync(roleEntity);
                 }
 
-                existing.UserRoleName = incoming.RoleName ?? existing.UserRoleName;
-                existing.Description = incoming.Description ?? existing.Description;
-                existing.User = user;
+                var join = new UserRoleUserModel
+                {
+                    Name = GenerateName(new UserRoleUserModel().DefaultResourceIdentifier),
+                    User = user,
+                    UserRole = roleEntity
+                };
+                user.userRoleUsers.Add(join);
             }
         }
 
@@ -201,8 +216,8 @@ namespace AssetGeoTagging.API.Services
             var total = await baseQuery.CountAsync();
 
             var users = await baseQuery
-                .Include(u => u.UserGroups)
-                .Include(u => u.UserRoles)
+                .Include(u => u.userGroupUsers).ThenInclude(j => j.UserGroup)
+                .Include(u => u.userRoleUsers).ThenInclude(j => j.UserRole)
                 .OrderBy(u => u.CreatedOn)
                 .Skip(page.Skip)
                 .Take(page.Take)
@@ -224,8 +239,8 @@ namespace AssetGeoTagging.API.Services
             }
 
             var user = await _context.Set<UserModel>()
-                .Include(u => u.UserGroups)
-                .Include(u => u.UserRoles)
+                .Include(u => u.userGroupUsers).ThenInclude(j => j.UserGroup)
+                .Include(u => u.userRoleUsers).ThenInclude(j => j.UserRole)
                 .FirstOrDefaultAsync(u => u.Name == request.Name);
 
             if (user == null)
@@ -262,8 +277,8 @@ namespace AssetGeoTagging.API.Services
             else
             {
                 entity = await _context.Set<UserModel>()
-                    .Include(u => u.UserGroups)
-                    .Include(u => u.UserRoles)
+                    .Include(u => u.userGroupUsers).ThenInclude(j => j.UserGroup)
+                    .Include(u => u.userRoleUsers).ThenInclude(j => j.UserRole)
                     .FirstOrDefaultAsync(u => u.Name == incoming.Name);
 
                 if (entity == null)
@@ -299,8 +314,8 @@ namespace AssetGeoTagging.API.Services
             }
 
             var user = await _context.Set<UserModel>()
-                .Include(u => u.UserGroups)
-                .Include(u => u.UserRoles)
+                .Include(u => u.userGroupUsers)
+                .Include(u => u.userRoleUsers)
                 .FirstOrDefaultAsync(u => u.Name == request.Name);
 
             if (user == null)
@@ -308,6 +323,15 @@ namespace AssetGeoTagging.API.Services
                 throw new RpcException(new Status(StatusCode.NotFound, $"User '{request.Name}' not found"));
             }
 
+            // Remove join entities first to avoid FK issues if cascade delete isn't configured
+            if (user.userGroupUsers != null && user.userGroupUsers.Count > 0)
+            {
+                _context.Set<UserGroupUserModel>().RemoveRange(user.userGroupUsers);
+            }
+            if (user.userRoleUsers != null && user.userRoleUsers.Count > 0)
+            {
+                _context.Set<UserRoleUserModel>().RemoveRange(user.userRoleUsers);
+            }
             _context.Set<UserModel>().Remove(user);
             await _context.SaveChangesAsync();
             return new Google.Protobuf.WellKnownTypes.Empty();
