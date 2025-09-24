@@ -27,3 +27,19 @@ const created = await api.createUser({ name: 'Alice' })
 const updated = await api.updateUser(123, { name: 'Alice Updated' })
 await api.deleteUser(123)
 ```
+
+C# usage (.NET 6+):
+
+```
+using System.Text.Json.Nodes;
+using Api;
+
+var config = new UserApiConfig(baseUrl: "https://example.com", authToken: "token");
+using var api = new UserApi(config);
+
+var users = await api.ListUsersAsync(page: 1, perPage: 20);
+var user = await api.GetUserAsync(123);
+var created = await api.CreateUserAsync(new JsonObject { ["name"] = "Alice" });
+var updated = await api.UpdateUserAsync(123, new JsonObject { ["name"] = "Alice Updated" });
+var deleted = await api.DeleteUserAsync(123);
+```
