@@ -1,1 +1,29 @@
 Hi
+
+User API clients are available in Python and JavaScript under `api/`.
+
+Python usage:
+
+```
+from api.user_api import UserApi, UserApiConfig
+
+api = UserApi(UserApiConfig(base_url="https://example.com", auth_token="token"))
+users = api.list_users(page=1, per_page=20)
+user = api.get_user(123)
+created = api.create_user({"name": "Alice"})
+updated = api.update_user(123, {"name": "Alice Updated"})
+api.delete_user(123)
+```
+
+JavaScript usage (Node 18+ or browser):
+
+```
+import UserApi from './api/userApi.js'
+
+const api = new UserApi('https://example.com', { authToken: 'token' })
+const users = await api.listUsers({ page: 1, perPage: 20 })
+const user = await api.getUser(123)
+const created = await api.createUser({ name: 'Alice' })
+const updated = await api.updateUser(123, { name: 'Alice Updated' })
+await api.deleteUser(123)
+```
