@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using AssetGeoTagging.DAL;
 using AssetGeoTagging.Model;
+using AutoMapper;
 using Grpc.Core;
 using Microsoft.EntityFrameworkCore;
 using Olameter.Sdi.Assetgeotagging.V1;
@@ -23,10 +24,16 @@ namespace AssetGeoTagging.API.Services
     public class UserService : Olameter.Sdi.Assetgeotagging.V1.UserService.UserServiceBase
     {
         private readonly ApplicationDbContext _context;
+        private readonly IMapper _mapper;
 
-        public UserService(ApplicationDbContext context)
+        /// <summary>
+        ///     gRPC UserService implementation for managing users, groups, and roles.
+        ///     Uses EF Core for persistence and AutoMapper for DTO mapping.
+        /// </summary>
+        public UserService(ApplicationDbContext context, IMapper mapper)
         {
             _context = context;
+            _mapper = mapper;
         }
 
         private static bool ParseStatusStringToBool(string status)
@@ -48,65 +55,9 @@ namespace AssetGeoTagging.API.Services
             return (prefix ?? string.Empty) + Guid.NewGuid().ToString("N");
         }
 
-        private static UserDto MapToUserDto(UserModel model)
-        {
-            var dto = new UserDto
-            {
-                Name = model.Name,
-                UserName = model.UserName ?? string.Empty,
-                Email = model.Eamil ?? string.Empty,
-                PhoneNumber = model.PhoneNumber ?? string.Empty,
-                Title = model.Title ?? string.Empty,
-                Status = ParseStatusStringToBool(model.Status),
-                UpdatedBy = model.UpdatedBy ?? string.Empty
-            };
+        // Mapping is handled by AutoMapper profiles (see UserMappings). No inline map logic here.
 
-            if (model.userRoleUsers != null)
-            {
-                foreach (var roleJoin in model.userRoleUsers)
-                {
-                    var role = roleJoin?.UserRole;
-                    if (role == null) continue;
-                    dto.UserRoles.Add(new UserRoleDto
-                    {
-                        Name = role.Name,
-                        RoleName = role.UserRoleName ?? string.Empty,
-                        Description = role.Description ?? string.Empty
-                    });
-                }
-            }
-
-            if (model.userGroupUsers != null)
-            {
-                foreach (var groupJoin in model.userGroupUsers)
-                {
-                    var group = groupJoin?.UserGroup;
-                    if (group == null) continue;
-                    dto.UserGroups.Add(new UserGroupDto
-                    {
-                        Name = group.Name,
-                        UserGroupName = group.UserGroupName ?? string.Empty,
-                        Description = group.Description ?? string.Empty,
-                        Status = ParseStatusStringToBool(group.Status),
-                        UpdatedBy = group.UpdatedBy ?? string.Empty
-                    });
-                }
-            }
-
-            return dto;
-        }
-
-        private static void MapUserDtoOntoEntity(UserDto dto, UserModel entity)
-        {
-            // Preserve entity.Name unless creating new
-            entity.UserName = dto.UserName ?? entity.UserName;
-            entity.Eamil = dto.Email ?? entity.Eamil;
-            entity.PhoneNumber = dto.PhoneNumber ?? entity.PhoneNumber;
-            entity.Title = dto.Title ?? entity.Title;
-            entity.Status = StatusBoolToString(dto.Status);
-            entity.UpdatedBy = dto.UpdatedBy ?? entity.UpdatedBy;
-            entity.UpdatedOn = DateTime.UtcNow;
-        }
+        // Field-to-field updates handled via AutoMapper; timestamps set explicitly below.
 
         private async Task ReplaceUserGroupsAsync(UserModel user, IEnumerable<UserGroupDto> groups)
         {
@@ -212,6 +163,7 @@ namespace AssetGeoTagging.API.Services
             if (page.Take <= 0) page.Take = 50;
             if (page.Skip < 0) page.Skip = 0;
 
+            // Build base query for pagination; include join entities for accurate mapping
             var baseQuery = _context.Set<UserModel>().AsNoTracking();
             var total = await baseQuery.CountAsync();
 
@@ -227,7 +179,8 @@ namespace AssetGeoTagging.API.Services
             {
                 Page = new PageResponse { Total = total }
             };
-            response.Users.AddRange(users.Select(MapToUserDto));
+            // Map list using AutoMapper
+            response.Users.AddRange(users.Select(u => _mapper.Map<UserDto>(u)));
             return response;
         }
 
@@ -248,7 +201,7 @@ namespace AssetGeoTagging.API.Services
                 throw new RpcException(new Status(StatusCode.NotFound, $"User '{request.Name}' not found"));
             }
 
-            return MapToUserDto(user);
+            return _mapper.Map<UserDto>(user);
         }
 
         public override async Task<UserDto> SaveUser(SaveUserRequest request, ServerCallContext context)
@@ -269,7 +222,9 @@ namespace AssetGeoTagging.API.Services
                     Name = GenerateName(new UserModel().DefaultResourceIdentifier),
                     CreatedOn = DateTime.UtcNow
                 };
-                MapUserDtoOntoEntity(incoming, entity);
+                // Map simple fields
+                _mapper.Map(incoming, entity);
+                entity.UpdatedOn = DateTime.UtcNow;
                 await ReplaceUserGroupsAsync(entity, incoming.UserGroups);
                 await ReplaceUserRolesAsync(entity, incoming.UserRoles);
                 await _context.Set<UserModel>().AddAsync(entity);
@@ -289,21 +244,23 @@ namespace AssetGeoTagging.API.Services
                         Name = incoming.Name,
                         CreatedOn = DateTime.UtcNow
                     };
-                    MapUserDtoOntoEntity(incoming, entity);
+                    _mapper.Map(incoming, entity);
+                    entity.UpdatedOn = DateTime.UtcNow;
                     await ReplaceUserGroupsAsync(entity, incoming.UserGroups);
                     await ReplaceUserRolesAsync(entity, incoming.UserRoles);
                     await _context.Set<UserModel>().AddAsync(entity);
                 }
                 else
                 {
-                    MapUserDtoOntoEntity(incoming, entity);
+                    _mapper.Map(incoming, entity);
+                    entity.UpdatedOn = DateTime.UtcNow;
                     await ReplaceUserGroupsAsync(entity, incoming.UserGroups);
                     await ReplaceUserRolesAsync(entity, incoming.UserRoles);
                 }
             }
 
             await _context.SaveChangesAsync();
-            return MapToUserDto(entity);
+            return _mapper.Map<UserDto>(entity);
         }
 
         public override async Task<Google.Protobuf.WellKnownTypes.Empty> DeleteUser(DeleteUserRequest request, ServerCallContext context)
@@ -358,14 +315,7 @@ namespace AssetGeoTagging.API.Services
 
             foreach (var g in groups)
             {
-                response.Groups.Add(new UserGroupDto
-                {
-                    Name = g.Name,
-                    UserGroupName = g.UserGroupName ?? string.Empty,
-                    Description = g.Description ?? string.Empty,
-                    Status = ParseStatusStringToBool(g.Status),
-                    UpdatedBy = g.UpdatedBy ?? string.Empty
-                });
+                response.Groups.Add(_mapper.Map<UserGroupDto>(g));
             }
 
             return response;
@@ -384,14 +334,7 @@ namespace AssetGeoTagging.API.Services
                 throw new RpcException(new Status(StatusCode.NotFound, $"Group '{request.Name}' not found"));
             }
 
-            return new UserGroupDto
-            {
-                Name = group.Name,
-                UserGroupName = group.UserGroupName ?? string.Empty,
-                Description = group.Description ?? string.Empty,
-                Status = ParseStatusStringToBool(group.Status),
-                UpdatedBy = group.UpdatedBy ?? string.Empty
-            };
+            return _mapper.Map<UserGroupDto>(group);
         }
 
         public override async Task<UserGroupDto> SaveGroup(SaveGroupRequest request, ServerCallContext context)
@@ -412,10 +355,7 @@ namespace AssetGeoTagging.API.Services
                     Name = GenerateName(new UserGroupModel().DefaultResourceIdentifier),
                     CreatedOn = DateTime.UtcNow
                 };
-                entity.UserGroupName = incoming.UserGroupName ?? entity.UserGroupName;
-                entity.Description = incoming.Description ?? entity.Description;
-                entity.Status = StatusBoolToString(incoming.Status);
-                entity.UpdatedBy = incoming.UpdatedBy ?? entity.UpdatedBy;
+                _mapper.Map(incoming, entity);
                 entity.UpdatedOn = DateTime.UtcNow;
                 await _context.Set<UserGroupModel>().AddAsync(entity);
             }
@@ -432,23 +372,13 @@ namespace AssetGeoTagging.API.Services
                     await _context.Set<UserGroupModel>().AddAsync(entity);
                 }
 
-                entity.UserGroupName = incoming.UserGroupName ?? entity.UserGroupName;
-                entity.Description = incoming.Description ?? entity.Description;
-                entity.Status = StatusBoolToString(incoming.Status);
-                entity.UpdatedBy = incoming.UpdatedBy ?? entity.UpdatedBy;
+                _mapper.Map(incoming, entity);
                 entity.UpdatedOn = DateTime.UtcNow;
             }
 
             await _context.SaveChangesAsync();
 
-            return new UserGroupDto
-            {
-                Name = entity.Name,
-                UserGroupName = entity.UserGroupName ?? string.Empty,
-                Description = entity.Description ?? string.Empty,
-                Status = ParseStatusStringToBool(entity.Status),
-                UpdatedBy = entity.UpdatedBy ?? string.Empty
-            };
+            return _mapper.Map<UserGroupDto>(entity);
         }
 
         public override async Task<Google.Protobuf.WellKnownTypes.Empty> DeleteGroup(DeleteGroupRequest request, ServerCallContext context)
@@ -479,12 +409,7 @@ namespace AssetGeoTagging.API.Services
             {
                 foreach (var r in rolesFromDb)
                 {
-                    response.Roles.Add(new UserRoleDto
-                    {
-                        Name = r.Name,
-                        RoleName = r.UserRoleName ?? string.Empty,
-                        Description = r.Description ?? string.Empty
-                    });
+                    response.Roles.Add(_mapper.Map<UserRoleDto>(r));
                 }
             }
             else
