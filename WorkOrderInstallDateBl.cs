@@ -75,7 +75,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 workOrders = workOrders.Where(x => data.WorkOrders.Select(y => y.Name).Contains(x.Name)).AsQueryable();
 
             // Materialize once; the previous implementation re-materialized workOrders multiple times.
-            List<WorkOrderModel> workOrderList = await workOrders.ToListAsync();
+            List<WorkOrderModel> workOrderList = await ToListCompatAsync(workOrders);
             Dictionary<string, WorkOrderInstallDateDto> dtoByName = (data.WorkOrders ?? new List<WorkOrderInstallDateDto>())
                 .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -235,6 +235,18 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             }
 
             await Task.WhenAll(batchTasks);
+        }
+
+        /// <summary>
+        /// Supports unit tests that use mocked/in-memory IQueryable providers that don't implement EF async.
+        /// In production (EF Core provider), this uses ToListAsync.
+        /// </summary>
+        private static Task<List<T>> ToListCompatAsync<T>(IQueryable<T> query, CancellationToken cancellationToken = default)
+        {
+            if (query is IAsyncEnumerable<T>)
+                return EntityFrameworkQueryableExtensions.ToListAsync(query, cancellationToken);
+
+            return Task.FromResult(query.ToList());
         }
     }
 }
