@@ -1,4 +1,4 @@
-﻿using WFMS.WorkOrderExecution.Model;
+using WFMS.WorkOrderExecution.Model;
 using WFMS.WorkOrderExecution.Model.Dto;
 using WFMS.WorkOrderExecution.BL.Utility;
 using System.Threading.Tasks;
@@ -13,7 +13,6 @@ using System.Diagnostics;
 using Xamarin.Forms.Internals;
 using System.Threading;
 using Microsoft.EntityFrameworkCore;
-using System.Collections.Concurrent;
 using OlameterFramework.EventBus.IntegrationEventLog;
 
 namespace WFMS.WorkOrderExecution.BL.BusinessLayer
@@ -31,6 +30,10 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
         private readonly IMessageIntegrationEventLogService _eventLogService;
         private readonly IKafkaHelper _kafkaHelper;
 
+        // History write batching: avoid one DbContext + SaveChanges per work order
+        private const int HistoryBatchSize = 200;
+        private const int HistoryMaxParallelBatches = 4;
+
         public WorkOrderInstallDateBl(ApplicationDbContext context,IWorkOrderBlackOutBl blackOutBl,IMapper mapper,
             IMessageIntegrationEventLogService eventLogService, IKafkaHelper kafkaHelper)
         {
@@ -46,9 +49,10 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             Stopwatch st = new Stopwatch();
             st.Start();
             List<InstallDateException> exceptions = new List<InstallDateException>();
-            ConcurrentBag<Task> historiesTask = new ConcurrentBag<Task>();
-            List<WorkOrderInstallDateDto> insideBlackOutList = new List<WorkOrderInstallDateDto>();
-            List<WorkOrderInstallDateDto> missingCycleRouteList = new List<WorkOrderInstallDateDto>();
+            List<(WorkOrderModel Current, WorkOrderModel Previous)> historiesToWrite = new List<(WorkOrderModel, WorkOrderModel)>();
+
+            HashSet<string> insideBlackOutNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> missingCycleRouteNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             int count = 0;
 
@@ -70,44 +74,65 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             else
                 workOrders = workOrders.Where(x => data.WorkOrders.Select(y => y.Name).Contains(x.Name)).AsQueryable();
 
+            // Materialize once; the previous implementation re-materialized workOrders multiple times.
+            List<WorkOrderModel> workOrderList = await workOrders.ToListAsync();
+            Dictionary<string, WorkOrderInstallDateDto> dtoByName = (data.WorkOrders ?? new List<WorkOrderInstallDateDto>())
+                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
             if (data.Date > DateTime.MinValue)
             {
-                workOrders.Select(x => new { x.ContractName, x.ServiceType }).Distinct().ToList().ForEach(x =>
+                // If these fields are missing, we can mark all as missing without iterating the blackout rules.
+                if (cycleField == null || routeField == null)
                 {
-                    List<NextBlackOutDto> blackouts = _blackOutBl.GetAllBlackOuts(x.ContractName, x.ServiceType, data.Date);
-                    workOrders.Where(y => y.ContractName == x.ContractName && y.ServiceType == x.ServiceType).ToList()
-                              .ForEach(y => {
-                                  WorkOrderInstallDateDto dto = data.WorkOrders.Single(z => z.Name == y.Name);
+                    foreach (var wo in workOrderList)
+                        missingCycleRouteNames.Add(wo.Name);
+                }
 
-                                  if (cycleField == null || routeField == null)
-                                      missingCycleRouteList.Add(dto);
-                                  
-                                  else if (ValidateBlackOut(y, blackouts,data.Date,cycleField,routeField))
-                                      insideBlackOutList.Add(dto);
-                              });
-                });
+                foreach (var group in workOrderList.GroupBy(x => new { x.ContractName, x.ServiceType }))
+                {
+                    // Blackouts are requested once per (contract, serviceType)
+                    List<NextBlackOutDto> blackouts = _blackOutBl.GetAllBlackOuts(group.Key.ContractName, group.Key.ServiceType, data.Date);
+                    if (blackouts == null || blackouts.Count == 0)
+                        continue;
+
+                    // Only check blackout conditions if we have the necessary fields.
+                    if (cycleField == null || routeField == null)
+                        continue;
+
+                    foreach (var wo in group)
+                    {
+                        if (ValidateBlackOut(wo, blackouts, data.Date, cycleField, routeField))
+                            insideBlackOutNames.Add(wo.Name);
+                    }
+                }
             }
 
-            WorkOrderModel[] computedWorkOrders = new WorkOrderModel[0];
-
-            workOrders.AsParallel().ForEach(wo =>
+            // NOTE: DbContext is not thread-safe, do NOT use AsParallel() here.
+            List<WorkOrderModel> computedWorkOrders = new List<WorkOrderModel>(workOrderList.Count);
+            foreach (var wo in workOrderList)
             {
                 bool hasException = false;
                 try
                 {
                     WorkOrderModel previous = _mapper.Map(wo, new WorkOrderModel());
 
-                    if (missingCycleRouteList.Any(x => x.Name == wo.Name))
-                        throw new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} should have the field cycle/route");
+                    if (missingCycleRouteNames.Contains(wo.Name))
+                    {
+                        string woId = workOrderIdField == null ? wo.Name : wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")?.ToString();
+                        throw new InstallDateException(wo.Name, $"Work Order {woId} should have the field cycle/route");
+                    }
 
                     //Important: Temp solution blackout should be in the message because the UI need it to filter the blocking exception
-                    if (insideBlackOutList.Any(x => x.Name == wo.Name))
-                        exceptions.Add(new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} is inside a blackout"));
+                    if (insideBlackOutNames.Contains(wo.Name))
+                    {
+                        string woId = workOrderIdField == null ? wo.Name : wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")?.ToString();
+                        exceptions.Add(new InstallDateException(wo.Name, $"Work Order {woId} is inside a blackout"));
+                    }
 
                     wo.InstallDate = data.Date;
 
-                    AddHistory(wo, previous, username, ref historiesTask);
+                    AddHistory(wo, previous, username, ref historiesToWrite);
 
                 }
                 catch (InstallDateException e)
@@ -122,25 +147,23 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 }
                 finally
                 {
-                    if (!hasException) {
-                        Array.Resize(ref computedWorkOrders,computedWorkOrders.Length+1);
-                        computedWorkOrders[computedWorkOrders.Length - 1] = wo;
-                    }
+                    if (!hasException)
+                        computedWorkOrders.Add(wo);
                         
 
                     Interlocked.Increment(ref count);
                 }
-            });
+            }
 
             await _context.SaveChangesAsync();
 
-            Parallel.ForEachAsync(historiesTask,async (task,token) => task.Start());
+            await WriteHistoriesBatchedAsync(historiesToWrite, username);
             
             st.Stop();
             LoggerUtil.LogDebug($"Async Parallel Duration: {st.Elapsed.TotalSeconds}");
             return new InstallDateResultDto
             {
-                Computed = computedWorkOrders,
+                Computed = computedWorkOrders.ToArray(),
                 Error = exceptions.Select(e => new InstallDateErrorDto { 
                     Name = e.WorkOrderName,
                     Message = e.Message 
@@ -165,22 +188,53 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             return result;
         }
 
-        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username,ref ConcurrentBag<Task> historiesTask)
+        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username, ref List<(WorkOrderModel Current, WorkOrderModel Previous)> historiesToWrite)
         {
-            Task historyTask = new Task(() =>
+            historiesToWrite.Add((current, previous));
+        }
+
+        private async Task WriteHistoriesBatchedAsync(List<(WorkOrderModel Current, WorkOrderModel Previous)> histories, string username)
+        {
+            if (histories == null || histories.Count == 0)
+                return;
+
+            // Limit parallelism to avoid exhausting DB connections.
+            using SemaphoreSlim gate = new SemaphoreSlim(HistoryMaxParallelBatches, HistoryMaxParallelBatches);
+            List<Task> batchTasks = new List<Task>();
+
+            for (int i = 0; i < histories.Count; i += HistoryBatchSize)
             {
-                using (ApplicationDbContext taskContext = new ApplicationDbContext())
+                int start = i;
+                int count = Math.Min(HistoryBatchSize, histories.Count - start);
+                batchTasks.Add(Task.Run(async () =>
                 {
-                    HistoryBl historyBl = new HistoryBl(taskContext
-                                            , new WoGenericEnumValuesBl(taskContext)
-                                            , new AuditLogBl(taskContext)
-                                            , new HistoryDal(taskContext),_mapper, _kafkaHelper);
+                    await gate.WaitAsync();
+                    try
+                    {
+                        using ApplicationDbContext taskContext = new ApplicationDbContext();
+                        HistoryBl historyBl = new HistoryBl(taskContext,
+                            new WoGenericEnumValuesBl(taskContext),
+                            new AuditLogBl(taskContext),
+                            new HistoryDal(taskContext),
+                            _mapper,
+                            _kafkaHelper);
 
-                    historyBl.Create(current, previous, username, true);
-                }
-            });
+                        // Save once per batch (best-effort) instead of once per work order.
+                        for (int j = 0; j < count; j++)
+                        {
+                            var item = histories[start + j];
+                            bool andSave = (j == count - 1);
+                            historyBl.Create(item.Current, item.Previous, username, andSave);
+                        }
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }));
+            }
 
-            historiesTask.Add(historyTask);
+            await Task.WhenAll(batchTasks);
         }
     }
 }
