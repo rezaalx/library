@@ -1,4 +1,4 @@
-﻿using AutoMapper;
+using AutoMapper;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using NSubstitute;
@@ -199,7 +199,7 @@ namespace WFMS.WorkOrderExecution.Tests
         {
         }
 
-        protected override void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username, ref List<(WorkOrderModel Current, WorkOrderModel Previous)> historiesToWrite)
+        protected override void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username, ref ConcurrentBag<HistoryData> historyDataList)
         {
             LoggerUtil.LogDebug("Add History in Test");
         } 

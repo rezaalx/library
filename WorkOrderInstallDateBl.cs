@@ -1,4 +1,4 @@
-﻿using WFMS.WorkOrderExecution.Model;
+using WFMS.WorkOrderExecution.Model;
 using WFMS.WorkOrderExecution.Model.Dto;
 using WFMS.WorkOrderExecution.BL.Utility;
 using System.Threading.Tasks;
@@ -41,12 +41,20 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             _kafkaHelper = kafkaHelper;
         }
 
+        protected class HistoryData
+        {
+            public WorkOrderModel Current { get; set; }
+            public WorkOrderModel Previous { get; set; }
+            public string Username { get; set; }
+        }
+
         public async Task<InstallDateResultDto> SetInstallDate(InstallDateDto data,string username)
         {
             Stopwatch st = new Stopwatch();
             st.Start();
             List<InstallDateException> exceptions = new List<InstallDateException>();
-            ConcurrentBag<Task> historiesTask = new ConcurrentBag<Task>();
+            ConcurrentBag<HistoryData> historyDataList = new ConcurrentBag<HistoryData>();
+            ConcurrentBag<WorkOrderModel> computedWorkOrdersBag = new ConcurrentBag<WorkOrderModel>();
             List<WorkOrderInstallDateDto> insideBlackOutList = new List<WorkOrderInstallDateDto>();
             List<WorkOrderInstallDateDto> missingCycleRouteList = new List<WorkOrderInstallDateDto>();
 
@@ -89,8 +97,6 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 });
             }
 
-            WorkOrderModel[] computedWorkOrders = new WorkOrderModel[0];
-
             workOrders.AsParallel().ForEach(wo =>
             {
                 bool hasException = false;
@@ -107,7 +113,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
 
                     wo.InstallDate = data.Date;
 
-                    AddHistory(wo, previous, username, ref historiesTask);
+                    AddHistory(wo, previous, username, ref historyDataList);
 
                 }
                 catch (InstallDateException e)
@@ -123,8 +129,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 finally
                 {
                     if (!hasException) {
-                        Array.Resize(ref computedWorkOrders,computedWorkOrders.Length+1);
-                        computedWorkOrders[computedWorkOrders.Length - 1] = wo;
+                        computedWorkOrdersBag.Add(wo);
                     }
                         
 
@@ -132,15 +137,23 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 }
             });
 
-            await _context.SaveChangesAsync();
+            var historyDal = new HistoryDal(_context);
+            var gevBl = new WoGenericEnumValuesBl(_context);
+            var auditBl = new AuditLogBl(_context);
+            var historyBl = new HistoryBl(_context, gevBl, auditBl, historyDal, _mapper, _kafkaHelper);
 
-            Parallel.ForEachAsync(historiesTask,async (task,token) => task.Start());
+            foreach (var historyData in historyDataList)
+            {
+                historyBl.Create(historyData.Current, historyData.Previous, historyData.Username, false);
+            }
+
+            await _context.SaveChangesAsync();
             
             st.Stop();
             LoggerUtil.LogDebug($"Async Parallel Duration: {st.Elapsed.TotalSeconds}");
             return new InstallDateResultDto
             {
-                Computed = computedWorkOrders,
+                Computed = computedWorkOrdersBag.ToArray(),
                 Error = exceptions.Select(e => new InstallDateErrorDto { 
                     Name = e.WorkOrderName,
                     Message = e.Message 
@@ -165,22 +178,9 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             return result;
         }
 
-        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username,ref ConcurrentBag<Task> historiesTask)
+        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username,ref ConcurrentBag<HistoryData> historyDataList)
         {
-            Task historyTask = new Task(() =>
-            {
-                using (ApplicationDbContext taskContext = new ApplicationDbContext())
-                {
-                    HistoryBl historyBl = new HistoryBl(taskContext
-                                            , new WoGenericEnumValuesBl(taskContext)
-                                            , new AuditLogBl(taskContext)
-                                            , new HistoryDal(taskContext),_mapper, _kafkaHelper);
-
-                    historyBl.Create(current, previous, username, true);
-                }
-            });
-
-            historiesTask.Add(historyTask);
+            historyDataList.Add(new HistoryData { Current = current, Previous = previous, Username = username });
         }
     }
 }
