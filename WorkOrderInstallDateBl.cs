@@ -55,9 +55,6 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             List<InstallDateException> exceptions = new List<InstallDateException>();
             ConcurrentBag<HistoryData> historyDataList = new ConcurrentBag<HistoryData>();
             ConcurrentBag<WorkOrderModel> computedWorkOrdersBag = new ConcurrentBag<WorkOrderModel>();
-            List<WorkOrderInstallDateDto> insideBlackOutList = new List<WorkOrderInstallDateDto>();
-            List<WorkOrderInstallDateDto> missingCycleRouteList = new List<WorkOrderInstallDateDto>();
-
             int count = 0;
 
             IQueryable<WorkOrderModel> workOrders = _context.Set<WorkOrderModel>().AsQueryable();
@@ -79,36 +76,41 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 workOrders = workOrders.Where(x => data.WorkOrders.Select(y => y.Name).Contains(x.Name)).AsQueryable();
 
 
+            List<WorkOrderModel> workOrdersList = workOrders.ToList();
+
+            HashSet<string> insideBlackOutNames = new HashSet<string>();
+            HashSet<string> missingCycleRouteNames = new HashSet<string>();
+
             if (data.Date > DateTime.MinValue)
             {
-                workOrders.Select(x => new { x.ContractName, x.ServiceType }).Distinct().ToList().ForEach(x =>
+                workOrdersList.Select(x => new { x.ContractName, x.ServiceType }).Distinct().ToList().ForEach(x =>
                 {
                     List<NextBlackOutDto> blackouts = _blackOutBl.GetAllBlackOuts(x.ContractName, x.ServiceType, data.Date);
-                    workOrders.Where(y => y.ContractName == x.ContractName && y.ServiceType == x.ServiceType).ToList()
+                    workOrdersList.Where(y => y.ContractName == x.ContractName && y.ServiceType == x.ServiceType).ToList()
                               .ForEach(y => {
-                                  WorkOrderInstallDateDto dto = data.WorkOrders.Single(z => z.Name == y.Name);
+                                  // WorkOrderInstallDateDto dto = data.WorkOrders.Single(z => z.Name == y.Name);
 
                                   if (cycleField == null || routeField == null)
-                                      missingCycleRouteList.Add(dto);
+                                      missingCycleRouteNames.Add(y.Name);
                                   
                                   else if (ValidateBlackOut(y, blackouts,data.Date,cycleField,routeField))
-                                      insideBlackOutList.Add(dto);
+                                      insideBlackOutNames.Add(y.Name);
                               });
                 });
             }
 
-            workOrders.AsParallel().ForEach(wo =>
+            workOrdersList.AsParallel().ForEach(wo =>
             {
                 bool hasException = false;
                 try
                 {
                     WorkOrderModel previous = _mapper.Map(wo, new WorkOrderModel());
 
-                    if (missingCycleRouteList.Any(x => x.Name == wo.Name))
+                    if (missingCycleRouteNames.Contains(wo.Name))
                         throw new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} should have the field cycle/route");
 
                     //Important: Temp solution blackout should be in the message because the UI need it to filter the blocking exception
-                    if (insideBlackOutList.Any(x => x.Name == wo.Name))
+                    if (insideBlackOutNames.Contains(wo.Name))
                         exceptions.Add(new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} is inside a blackout"));
 
                     wo.InstallDate = data.Date;
