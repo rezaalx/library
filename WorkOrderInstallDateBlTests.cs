@@ -191,6 +191,48 @@ namespace WFMS.WorkOrderExecution.Tests
             //Assert.IsTrue(result.Computed.Count() > 0);
             Assert.IsTrue(result.Error.Any());
         }
+
+        [TestMethod]
+        public async Task SetDate_Performance_1000Records()
+        {
+            int count = 1000;
+            var workOrderList = new List<WorkOrderModel>();
+            var workOrderDtos = new List<WorkOrderInstallDateDto>();
+
+            for (int i = 0; i < count; i++)
+            {
+                string name = $"WO_{i}";
+                workOrderList.Add(new WorkOrderModel
+                {
+                    Name = name,
+                    ServiceType = "Power",
+                    ContractName = "A",
+                    JsonData = JsonDocument.Parse(new { Asset = new { InstallDate = string.Empty }, WorkOrder = new { WorkOrderId = name, Cycle = "1", Route = "a" } }.ToJsonString())
+                });
+
+                workOrderDtos.Add(new WorkOrderInstallDateDto
+                {
+                    Name = name,
+                    ContractName = "A",
+                    ServiceType = "Power"
+                });
+            }
+
+            DbSet<WorkOrderModel> workOrders = InitializeMockDBSet(workOrderList.AsQueryable());
+            _context.Set<WorkOrderModel>().Returns(workOrders);
+            _context.Set<WorkOrderModel>().AsQueryable().Returns(workOrders);
+
+            InstallDateResultDto result = await _bl.SetInstallDate(new InstallDateDto
+            {
+                WorkOrders = workOrderDtos,
+                Date = DateTime.Now.Date,
+                IsAll = false,
+            }, "test");
+
+            Assert.IsNotNull(result);
+            Assert.AreEqual(count, result.Computed.Length);
+            Assert.IsFalse(result.Error.Any());
+        }
     }
 
     public class WorkOrderInstallDateBlTest : WorkOrderInstallDateBl
