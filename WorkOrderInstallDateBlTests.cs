@@ -209,8 +209,14 @@ namespace WFMS.WorkOrderExecution.Tests
 
         protected override void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username, ref List<(WorkOrderModel Current, WorkOrderModel Previous)> historiesToWrite)
         {
+            base.AddHistory(current, previous, username, ref historiesToWrite);
             LoggerUtil.LogDebug("Add History in Test");
-        } 
+        }
+
+        protected override Task WriteHistoriesBatchedAsync(List<(WorkOrderModel Current, WorkOrderModel Previous)> histories, string username)
+        {
+            return Task.CompletedTask;
+        }
     }
 }
 
