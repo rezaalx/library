@@ -193,7 +193,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             historiesToWrite.Add((current, previous));
         }
 
-        private async Task WriteHistoriesBatchedAsync(List<(WorkOrderModel Current, WorkOrderModel Previous)> histories, string username)
+        protected virtual async Task WriteHistoriesBatchedAsync(List<(WorkOrderModel Current, WorkOrderModel Previous)> histories, string username)
         {
             if (histories == null || histories.Count == 0)
                 return;
