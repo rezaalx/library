@@ -1,4 +1,4 @@
-﻿using AutoMapper;
+using AutoMapper;
 using Dapr.Client;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -90,7 +90,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
         WorkOrderTaskModel GetFirstTaskTemplate(long workOrderId);
         WorkOrderModel AdminWorkOrder(WorkOrderModel workOrder, WoAdminDto woAdmin, string username, string token = null);
         WorkOrderModel UpdateFromEvent(WorkOrderModel workOrder, string username, bool andSave = false, DateTimeOffset? eventDate = null);
-        WorkOrderModel StatusUpdateWorkOrder(WorkOrderModel workOrder, StatusUpdateDto statusUpdate, string username, bool isAdmin = false);
+        List<WorkOrderModel> StatusUpdateWorkOrder(List<WorkOrderModel> workOrders, StatusUpdateDto statusUpdate, string username, bool isAdmin = false);
         bool SaveWorkOrdersAndAppointment(List<WorkOrderModel> workOrders, WorkOrderSchedulerModel woScheduler, string username);
     }
 
@@ -1157,7 +1157,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 throw new Exception($"WorkOrder not found");
             }
 
-            return StatusUpdateWorkOrder(workOrder, optOut, username);
+            return StatusUpdateWorkOrder(new List<WorkOrderModel> { workOrder }, optOut, username).FirstOrDefault();
         }
 
         public WorkOrderModel CSRHoldWorkOrder(WorkOrderModel workOrder, CSRHoldDto csrHold, string username)
@@ -1169,7 +1169,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
 
             if (_woStatusRules.CSRHoldWhiteList(workOrder.StatusWeb.Name))
             {
-                return StatusUpdateWorkOrder(workOrder, csrHold, username);
+                return StatusUpdateWorkOrder(new List<WorkOrderModel> { workOrder }, csrHold, username).FirstOrDefault();
             }
 
             throw new Exception($"Not allowed to set WorkOrder in CSRHold when status is: {workOrder.StatusWeb.Name}");
@@ -1182,7 +1182,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 throw new Exception($"WorkOrder not found");
             }
 
-            var updatedWo = StatusUpdateWorkOrder(workOrder, woAdmin, username, true);
+            var updatedWo = StatusUpdateWorkOrder(new List<WorkOrderModel> { workOrder }, woAdmin, username, true).FirstOrDefault();
 
             if(updatedWo != null)
             {
@@ -1193,86 +1193,144 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             return updatedWo;
         }
 
-        public WorkOrderModel StatusUpdateWorkOrder(WorkOrderModel workOrder, StatusUpdateDto statusUpdate, string username, bool isAdmin = false)
+        public List<WorkOrderModel> StatusUpdateWorkOrder(List<WorkOrderModel> workOrders, StatusUpdateDto statusUpdate, string username, bool isAdmin = false)
         {
-            WorkOrderModel modifiedWorkOrder = null;
+            if (workOrders == null)
+            {
+                throw new ArgumentNullException(nameof(workOrders));
+            }
+
+            if (workOrders.Count == 0)
+            {
+                return new List<WorkOrderModel>();
+            }
+
+            if (workOrders.Any(workOrder => workOrder == null))
+            {
+                throw new Exception("WorkOrder not found");
+            }
+
+            var workOrderNames = workOrders.Select(workOrder => workOrder.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct()
+                .ToList();
+            var currentTasksByWorkOrderName = new Dictionary<string, WorkOrderTaskModel>();
+
+            if (workOrderNames.Count > 0)
+            {
+                var currentTaskIds = _dal.DbContext.Set<WorkOrderTaskModel>()
+                    .Where(task => workOrderNames.Contains(task.WorkOrderName))
+                    .GroupBy(task => task.WorkOrderName)
+                    .Select(group => new { group.Key, TaskId = group.Max(task => task.Id) })
+                    .ToList();
+
+                if (currentTaskIds.Count > 0)
+                {
+                    var taskIds = currentTaskIds.Select(task => task.TaskId).ToList();
+                    var currentTasks = _dal.DbContext.Set<WorkOrderTaskModel>()
+                        .Where(task => taskIds.Contains(task.Id))
+                        .Include(task => task.TaskStatus)
+                        .AsNoTracking()
+                        .ToList();
+
+                    currentTasksByWorkOrderName = currentTasks.ToDictionary(task => task.WorkOrderName);
+                }
+            }
+
+            var user = _userBl.FindBy_IQueryable(x => x.UserName == username).FirstOrDefault();
+            var woWebStatusName = statusUpdate.WebStatus != null
+                ? statusUpdate.WebStatus.Name
+                : _workOrderConfig.GetCollectionItemById(Convert.ToInt64(statusUpdate.WorkOrderStatus))?.AttributesSchemas.FirstOrDefault(x => x.Key == "GUID")?.Value;
+            var statusWeb = _gevBl.GetOrCreate(StatusWeb.None.GetEnumName(), woWebStatusName, andSave: true);
+            var taskSkippedStatus = _gevBl.GetOrCreate(TaskStatus.TaskSkipped.GetEnumName(), TaskStatus.TaskSkipped.ToStringValue(), andSave: true);
+            var taskCompletedStatus = _gevBl.GetOrCreate(TaskStatus.TaskCompleted.GetEnumName(), TaskStatus.TaskCompleted.ToStringValue(), andSave: true);
+
+            var modifiedWorkOrders = new List<WorkOrderModel>(workOrders.Count);
 
             using (IDbContextTransaction transaction = _dbContext.Database.BeginTransaction())
             {
                 try
                 {
-                    var user = _userBl.FindBy_IQueryable(x => x.UserName == username).FirstOrDefault();
-                    var woWebStatusName = statusUpdate.WebStatus != null ? statusUpdate.WebStatus.Name : _workOrderConfig.GetCollectionItemById(Convert.ToInt64(statusUpdate.WorkOrderStatus))?.AttributesSchemas.FirstOrDefault(x => x.Key == "GUID")?.Value;
-                    var statusWeb = _gevBl.GetOrCreate(StatusWeb.None.GetEnumName(), woWebStatusName, andSave: true);
-                    _workOrderStatusManager.SetWorkOrderStatus(workOrder, statusWeb, isAdmin);
-                    SetWoAssignByStatus(workOrder);
-                    modifiedWorkOrder = Update(workOrder, username, true, false, isAdmin);
-
-                    //Skip current task if any
-                    var currentTask = _dal.GetAllIQueryable(x => x.Name == workOrder.Name, noTracking: true).Include(x => x.Tasks).FirstOrDefault().Tasks.OrderByDescending(x => x.Id).FirstOrDefault();
-
-                    if (currentTask != null && currentTask.TaskStatus.Name == TaskStatus.TaskNone.ToStringValue())
+                    foreach (var workOrder in workOrders)
                     {
-                        currentTask = _dal.DbContext.Set<WorkOrderTaskModel>().SingleOrDefault(x => x.Id == currentTask.Id);
-                        currentTask.Comment = statusUpdate.SkipCode;
-                        currentTask.TaskStatus = _gevBl.GetOrCreate(TaskStatus.TaskSkipped.GetEnumName(), TaskStatus.TaskSkipped.ToStringValue(), andSave: true);
-                        currentTask.CompletedBy = user != null ? user.DisplayName : "WOMS-T000000";
-                    }
+                        _workOrderStatusManager.SetWorkOrderStatus(workOrder, statusWeb, isAdmin);
+                        SetWoAssignByStatus(workOrder);
+                        var modifiedWorkOrder = Update(workOrder, username, true, false, isAdmin);
+                        modifiedWorkOrders.Add(modifiedWorkOrder);
 
-                    if(statusUpdate.TaskName != null)
-                    {
-                        //Create task                    
-                        var nextStep = new ExecutorModel.NextStepModel()
+                        if (currentTasksByWorkOrderName.TryGetValue(workOrder.Name, out var currentTask))
                         {
-                            WorkorderStatus = statusWeb.Name,
-                            TaskTemplate = new ExecutorModel.TaskModel()
+                            var currentTaskStatus = currentTask.TaskStatus?.Name ?? currentTask.TaskStatusString;
+                            if (currentTaskStatus == TaskStatus.TaskNone.ToStringValue())
                             {
-                                Name = statusUpdate.TaskName,
-                                Status = TaskStatus.TaskCompleted.ToStringValue()
+                                currentTask = _dal.DbContext.Set<WorkOrderTaskModel>().SingleOrDefault(x => x.Id == currentTask.Id);
+                                if (currentTask != null)
+                                {
+                                    currentTask.Comment = statusUpdate.SkipCode;
+                                    currentTask.TaskStatus = taskSkippedStatus;
+                                    currentTask.CompletedBy = user != null ? user.DisplayName : "WOMS-T000000";
+                                }
                             }
-                        };
+                        }
 
-                        CreateTask(workOrder, null, username, nextStep);
-                        _dal.SaveChanges();
-
-                        //Complete task
-                        var nextTask = _dal.GetAllIQueryable(x => x.Name == workOrder.Name, noTracking: true).Include(x => x.Tasks).FirstOrDefault().Tasks.OrderByDescending(x => x.Id).FirstOrDefault();
-
-                        if (nextTask != null)
+                        if (statusUpdate.TaskName != null)
                         {
-                            nextTask = _dal.DbContext.Set<WorkOrderTaskModel>().SingleOrDefault(x => x.Id == nextTask.Id);
-                            nextTask.Comment = statusUpdate.Comment;
-                            nextTask.TaskStatus = _gevBl.GetOrCreate(TaskStatus.TaskCompleted.GetEnumName(), TaskStatus.TaskCompleted.ToStringValue(), andSave: true);
-                            nextTask.CompletedBy = user != null ? user.DisplayName : "WOMS-T000000";
-
-                            ExecutorModel.NextStepModel ns = new ExecutorModel.NextStepModel()
+                            //Create task                    
+                            var nextStep = new ExecutorModel.NextStepModel()
                             {
-                                WorkorderStatus = workOrder.StatusWeb.Name,
-                                WorkorderTaskComment = statusUpdate.SkipCode
+                                WorkorderStatus = statusWeb.Name,
+                                TaskTemplate = new ExecutorModel.TaskModel()
+                                {
+                                    Name = statusUpdate.TaskName,
+                                    Status = TaskStatus.TaskCompleted.ToStringValue()
+                                }
                             };
 
-                            CreateNextTask(workOrder.Name, nextTask, username, ns);                            
-                        }
-                    }
+                            CreateTask(workOrder, null, username, nextStep);
+                            _dal.SaveChanges();
 
-                    _dal.SaveChanges();
+                            //Complete task
+                            var nextTask = _dal.GetAllIQueryable(x => x.Name == workOrder.Name, noTracking: true).Include(x => x.Tasks).FirstOrDefault()?.Tasks.OrderByDescending(x => x.Id).FirstOrDefault();
 
-                    //Create next task if it's specified
-                    if (!string.IsNullOrWhiteSpace(statusUpdate.NextTaskToCreate))
-                    {
-
-                        var nextTaskStep = new ExecutorModel.NextStepModel()
-                        {
-                            WorkorderStatus = statusWeb.Name,
-                            TaskTemplate = new ExecutorModel.TaskModel()
+                            if (nextTask != null)
                             {
-                                Name = statusUpdate.NextTaskToCreate,
-                                Status = TaskStatus.TaskNone.ToStringValue()
-                            }
-                        };
+                                nextTask = _dal.DbContext.Set<WorkOrderTaskModel>().SingleOrDefault(x => x.Id == nextTask.Id);
+                                if (nextTask != null)
+                                {
+                                    nextTask.Comment = statusUpdate.Comment;
+                                    nextTask.TaskStatus = taskCompletedStatus;
+                                    nextTask.CompletedBy = user != null ? user.DisplayName : "WOMS-T000000";
 
-                        CreateTask(modifiedWorkOrder, null, username, nextTaskStep);
+                                    ExecutorModel.NextStepModel ns = new ExecutorModel.NextStepModel()
+                                    {
+                                        WorkorderStatus = workOrder.StatusWeb.Name,
+                                        WorkorderTaskComment = statusUpdate.SkipCode
+                                    };
+
+                                    CreateNextTask(workOrder.Name, nextTask, username, ns);
+                                }
+                            }
+                        }
+
                         _dal.SaveChanges();
+
+                        //Create next task if it's specified
+                        if (!string.IsNullOrWhiteSpace(statusUpdate.NextTaskToCreate))
+                        {
+
+                            var nextTaskStep = new ExecutorModel.NextStepModel()
+                            {
+                                WorkorderStatus = statusWeb.Name,
+                                TaskTemplate = new ExecutorModel.TaskModel()
+                                {
+                                    Name = statusUpdate.NextTaskToCreate,
+                                    Status = TaskStatus.TaskNone.ToStringValue()
+                                }
+                            };
+
+                            CreateTask(modifiedWorkOrder, null, username, nextTaskStep);
+                            _dal.SaveChanges();
+                        }
                     }
 
                     transaction.Commit();
@@ -1284,7 +1342,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 }
             }
 
-            return modifiedWorkOrder;
+            return modifiedWorkOrders;
         }
 
         public WorkOrderModel ReleaseCSRHoldWorkOrder(string workOrderName, string username)
