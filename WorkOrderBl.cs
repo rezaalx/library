@@ -731,7 +731,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                     LoggerUtil.LogWarning($"WorkOrder {existing.Name} is not allowed to be sync by {username} because it's status is {existing.StatusWeb.Name}");
                 }
 
-                updatedModel = _postProcessingBl.RunPostProcess(updatedModel, username, token);
+                updatedModel = _postProcessingBl.RunPostProcess(new List<WorkOrderModel> { updatedModel }, username, token).FirstOrDefault();
             }
 
             return updatedModel;
@@ -1186,7 +1186,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
 
             if(updatedWo != null)
             {
-                updatedWo = _postProcessingBl.RunPostProcess(updatedWo, username, token);
+                updatedWo = _postProcessingBl.RunPostProcess(new List<WorkOrderModel> { updatedWo }, username, token).FirstOrDefault();
                 _dbContext.SaveChanges();
             }            
 

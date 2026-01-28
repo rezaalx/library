@@ -1,4 +1,4 @@
-﻿using AutoMapper;
+using AutoMapper;
 using OlameterFramework.EventBus;
 using OlameterFramework.EventBus.IntegrationEventLog;
 using OlameterFramework.OFramework.ConfigUtils;
@@ -23,7 +23,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
 {
     public interface IPostProcessingBl
     {
-        WorkOrderModel RunPostProcess(WorkOrderModel wo, string username,string token =null);
+        List<WorkOrderModel> RunPostProcess(List<WorkOrderModel> workOrders, string username,string token =null);
 
         WorkOrderModel RetryPostProcess(WorkOrderModel wo, string username);
 
@@ -59,8 +59,35 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             _awsCredentials = awsCredential;
         }
 
-        public WorkOrderModel RunPostProcess(WorkOrderModel wo, string username,string token=null)
+        public List<WorkOrderModel> RunPostProcess(List<WorkOrderModel> workOrders, string username,string token=null)
         {
+            if (workOrders == null)
+            {
+                throw new ArgumentNullException(nameof(workOrders));
+            }
+
+            if (workOrders.Count == 0)
+            {
+                return new List<WorkOrderModel>();
+            }
+
+            var updatedWorkOrders = new List<WorkOrderModel>(workOrders.Count);
+
+            foreach (var workOrder in workOrders)
+            {
+                updatedWorkOrders.Add(RunPostProcessInternal(workOrder, username, token));
+            }
+
+            return updatedWorkOrders;
+        }
+
+        private WorkOrderModel RunPostProcessInternal(WorkOrderModel wo, string username,string token=null)
+        {
+            if (wo == null)
+            {
+                throw new ArgumentNullException(nameof(wo));
+            }
+
             WorkOrderModel updatedWo = wo;
 
             if (updatedWo.StatusWebString == StatusWeb.Completed.ToString() || updatedWo.StatusWebString == StatusWeb.ReturnToUtility.ToString())
