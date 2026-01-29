@@ -1218,22 +1218,18 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
 
             if (workOrderNames.Count > 0)
             {
-                var currentTaskIds = _dal.DbContext.Set<WorkOrderTaskModel>()
-                    .Where(task => workOrderNames.Contains(task.WorkOrderName))
-                    .GroupBy(task => task.WorkOrderName)
-                    .Select(group => new { group.Key, TaskId = group.Max(task => task.Id) })
+                var workOrdersWithTasks = _dal.GetAllIQueryable(workOrder => workOrderNames.Contains(workOrder.Name), noTracking: true)
+                    .Include(workOrder => workOrder.Tasks)
+                    .ThenInclude(task => task.TaskStatus)
                     .ToList();
 
-                if (currentTaskIds.Count > 0)
+                foreach (var workOrder in workOrdersWithTasks)
                 {
-                    var taskIds = currentTaskIds.Select(task => task.TaskId).ToList();
-                    var currentTasks = _dal.DbContext.Set<WorkOrderTaskModel>()
-                        .Where(task => taskIds.Contains(task.Id))
-                        .Include(task => task.TaskStatus)
-                        .AsNoTracking()
-                        .ToList();
-
-                    currentTasksByWorkOrderName = currentTasks.ToDictionary(task => task.WorkOrderName);
+                    var currentTask = workOrder.Tasks?.OrderByDescending(task => task.Id).FirstOrDefault();
+                    if (currentTask != null)
+                    {
+                        currentTasksByWorkOrderName[workOrder.Name] = currentTask;
+                    }
                 }
             }
 
