@@ -1,4 +1,4 @@
-﻿using WFMS.WorkOrderExecution.Model;
+using WFMS.WorkOrderExecution.Model;
 using WFMS.WorkOrderExecution.Model.Dto;
 using WFMS.WorkOrderExecution.BL.Utility;
 using System.Threading.Tasks;
@@ -41,15 +41,20 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             _kafkaHelper = kafkaHelper;
         }
 
+        protected class HistoryData
+        {
+            public WorkOrderModel Current { get; set; }
+            public WorkOrderModel Previous { get; set; }
+            public string Username { get; set; }
+        }
+
         public async Task<InstallDateResultDto> SetInstallDate(InstallDateDto data,string username)
         {
             Stopwatch st = new Stopwatch();
             st.Start();
             List<InstallDateException> exceptions = new List<InstallDateException>();
-            ConcurrentBag<Task> historiesTask = new ConcurrentBag<Task>();
-            List<WorkOrderInstallDateDto> insideBlackOutList = new List<WorkOrderInstallDateDto>();
-            List<WorkOrderInstallDateDto> missingCycleRouteList = new List<WorkOrderInstallDateDto>();
-
+            ConcurrentBag<HistoryData> historyDataList = new ConcurrentBag<HistoryData>();
+            ConcurrentBag<WorkOrderModel> computedWorkOrdersBag = new ConcurrentBag<WorkOrderModel>();
             int count = 0;
 
             IQueryable<WorkOrderModel> workOrders = _context.Set<WorkOrderModel>().AsQueryable();
@@ -71,43 +76,46 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 workOrders = workOrders.Where(x => data.WorkOrders.Select(y => y.Name).Contains(x.Name)).AsQueryable();
 
 
+            List<WorkOrderModel> workOrdersList = workOrders.ToList();
+
+            HashSet<string> insideBlackOutNames = new HashSet<string>();
+            HashSet<string> missingCycleRouteNames = new HashSet<string>();
+
             if (data.Date > DateTime.MinValue)
             {
-                workOrders.Select(x => new { x.ContractName, x.ServiceType }).Distinct().ToList().ForEach(x =>
+                workOrdersList.Select(x => new { x.ContractName, x.ServiceType }).Distinct().ToList().ForEach(x =>
                 {
                     List<NextBlackOutDto> blackouts = _blackOutBl.GetAllBlackOuts(x.ContractName, x.ServiceType, data.Date);
-                    workOrders.Where(y => y.ContractName == x.ContractName && y.ServiceType == x.ServiceType).ToList()
+                    workOrdersList.Where(y => y.ContractName == x.ContractName && y.ServiceType == x.ServiceType).ToList()
                               .ForEach(y => {
-                                  WorkOrderInstallDateDto dto = data.WorkOrders.Single(z => z.Name == y.Name);
+                                  // WorkOrderInstallDateDto dto = data.WorkOrders.Single(z => z.Name == y.Name);
 
                                   if (cycleField == null || routeField == null)
-                                      missingCycleRouteList.Add(dto);
+                                      missingCycleRouteNames.Add(y.Name);
                                   
                                   else if (ValidateBlackOut(y, blackouts,data.Date,cycleField,routeField))
-                                      insideBlackOutList.Add(dto);
+                                      insideBlackOutNames.Add(y.Name);
                               });
                 });
             }
 
-            WorkOrderModel[] computedWorkOrders = new WorkOrderModel[0];
-
-            workOrders.AsParallel().ForEach(wo =>
+            workOrdersList.AsParallel().ForEach(wo =>
             {
                 bool hasException = false;
                 try
                 {
                     WorkOrderModel previous = _mapper.Map(wo, new WorkOrderModel());
 
-                    if (missingCycleRouteList.Any(x => x.Name == wo.Name))
+                    if (missingCycleRouteNames.Contains(wo.Name))
                         throw new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} should have the field cycle/route");
 
                     //Important: Temp solution blackout should be in the message because the UI need it to filter the blocking exception
-                    if (insideBlackOutList.Any(x => x.Name == wo.Name))
+                    if (insideBlackOutNames.Contains(wo.Name))
                         exceptions.Add(new InstallDateException(wo.Name, $"Work Order {wo.JsonData.Get($"{workOrderIdField.Category}.{workOrderIdField.Name}")} is inside a blackout"));
 
                     wo.InstallDate = data.Date;
 
-                    AddHistory(wo, previous, username, ref historiesTask);
+                    AddHistory(wo, previous, username, ref historyDataList);
 
                 }
                 catch (InstallDateException e)
@@ -123,8 +131,7 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 finally
                 {
                     if (!hasException) {
-                        Array.Resize(ref computedWorkOrders,computedWorkOrders.Length+1);
-                        computedWorkOrders[computedWorkOrders.Length - 1] = wo;
+                        computedWorkOrdersBag.Add(wo);
                     }
                         
 
@@ -132,15 +139,23 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 }
             });
 
-            await _context.SaveChangesAsync();
+            var historyDal = new HistoryDal(_context);
+            var gevBl = new WoGenericEnumValuesBl(_context);
+            var auditBl = new AuditLogBl(_context);
+            var historyBl = new HistoryBl(_context, gevBl, auditBl, historyDal, _mapper, _kafkaHelper);
 
-            Parallel.ForEachAsync(historiesTask,async (task,token) => task.Start());
+            foreach (var historyData in historyDataList)
+            {
+                historyBl.Create(historyData.Current, historyData.Previous, historyData.Username, false);
+            }
+
+            await _context.SaveChangesAsync();
             
             st.Stop();
             LoggerUtil.LogDebug($"Async Parallel Duration: {st.Elapsed.TotalSeconds}");
             return new InstallDateResultDto
             {
-                Computed = computedWorkOrders,
+                Computed = computedWorkOrdersBag.ToArray(),
                 Error = exceptions.Select(e => new InstallDateErrorDto { 
                     Name = e.WorkOrderName,
                     Message = e.Message 
@@ -165,22 +180,9 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
             return result;
         }
 
-        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username,ref ConcurrentBag<Task> historiesTask)
+        protected virtual void AddHistory(WorkOrderModel current, WorkOrderModel previous, string username,ref ConcurrentBag<HistoryData> historyDataList)
         {
-            Task historyTask = new Task(() =>
-            {
-                using (ApplicationDbContext taskContext = new ApplicationDbContext())
-                {
-                    HistoryBl historyBl = new HistoryBl(taskContext
-                                            , new WoGenericEnumValuesBl(taskContext)
-                                            , new AuditLogBl(taskContext)
-                                            , new HistoryDal(taskContext),_mapper, _kafkaHelper);
-
-                    historyBl.Create(current, previous, username, true);
-                }
-            });
-
-            historiesTask.Add(historyTask);
+            historyDataList.Add(new HistoryData { Current = current, Previous = previous, Username = username });
         }
     }
 }
