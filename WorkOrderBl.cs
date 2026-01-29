@@ -1210,26 +1210,47 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                 throw new Exception("WorkOrder not found");
             }
 
-            var workOrderNames = workOrders.Select(workOrder => workOrder.Name)
-                .Where(name => !string.IsNullOrWhiteSpace(name))
+            var currentTasksByWorkOrderId = new Dictionary<long, WorkOrderTaskModel>();
+            var workOrderIdsByName = new Dictionary<string, long>();
+
+            var workOrderIds = workOrders
+                .Where(workOrder => workOrder != null && workOrder.Id > 0)
+                .Select(workOrder => workOrder.Id)
                 .Distinct()
                 .ToList();
-            var currentTasksByWorkOrderName = new Dictionary<string, WorkOrderTaskModel>();
+            var missingIdNames = workOrders
+                .Where(workOrder => workOrder != null && workOrder.Id <= 0 && !string.IsNullOrWhiteSpace(workOrder.Name))
+                .Select(workOrder => workOrder.Name)
+                .Distinct()
+                .ToList();
 
-            if (workOrderNames.Count > 0)
+            if (missingIdNames.Count > 0)
             {
-                var workOrdersWithTasks = _dal.GetAllIQueryable(workOrder => workOrderNames.Contains(workOrder.Name), noTracking: true)
-                    .Include(workOrder => workOrder.Tasks)
-                    .ThenInclude(task => task.TaskStatus)
+                workOrderIdsByName = _dal.GetAllIQueryable(workOrder => missingIdNames.Contains(workOrder.Name), noTracking: true)
+                    .Select(workOrder => new { workOrder.Name, workOrder.Id })
+                    .ToDictionary(workOrder => workOrder.Name, workOrder => workOrder.Id);
+                workOrderIds.AddRange(workOrderIdsByName.Values);
+                workOrderIds = workOrderIds.Distinct().ToList();
+            }
+
+            if (workOrderIds.Count > 0)
+            {
+                var currentTaskIds = _dal.DbContext.Set<WorkOrderTaskModel>()
+                    .Where(task => workOrderIds.Contains(task.WorkOrderId))
+                    .GroupBy(task => task.WorkOrderId)
+                    .Select(group => new { group.Key, TaskId = group.Max(task => task.Id) })
                     .ToList();
 
-                foreach (var workOrder in workOrdersWithTasks)
+                if (currentTaskIds.Count > 0)
                 {
-                    var currentTask = workOrder.Tasks?.OrderByDescending(task => task.Id).FirstOrDefault();
-                    if (currentTask != null)
-                    {
-                        currentTasksByWorkOrderName[workOrder.Name] = currentTask;
-                    }
+                    var taskIds = currentTaskIds.Select(task => task.TaskId).ToList();
+                    var currentTasks = _dal.DbContext.Set<WorkOrderTaskModel>()
+                        .Where(task => taskIds.Contains(task.Id))
+                        .Include(task => task.TaskStatus)
+                        .AsNoTracking()
+                        .ToList();
+
+                    currentTasksByWorkOrderId = currentTasks.ToDictionary(task => task.WorkOrderId);
                 }
             }
 
@@ -1254,7 +1275,13 @@ namespace WFMS.WorkOrderExecution.BL.BusinessLayer
                         var modifiedWorkOrder = Update(workOrder, username, true, false, isAdmin);
                         modifiedWorkOrders.Add(modifiedWorkOrder);
 
-                        if (currentTasksByWorkOrderName.TryGetValue(workOrder.Name, out var currentTask))
+                        var workOrderId = workOrder.Id;
+                        if (workOrderId <= 0 && !string.IsNullOrWhiteSpace(workOrder.Name))
+                        {
+                            workOrderIdsByName.TryGetValue(workOrder.Name, out workOrderId);
+                        }
+
+                        if (workOrderId > 0 && currentTasksByWorkOrderId.TryGetValue(workOrderId, out var currentTask))
                         {
                             var currentTaskStatus = currentTask.TaskStatus?.Name ?? currentTask.TaskStatusString;
                             if (currentTaskStatus == TaskStatus.TaskNone.ToStringValue())
