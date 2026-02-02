@@ -1,4 +1,4 @@
-﻿using Olameter.WFMS.WorkOrderExecution.Common.V1;
+using Olameter.WFMS.WorkOrderExecution.Common.V1;
 using OlameterFramework.OFramework.BL;
 using OlameterFramework.OFramework.ConfigUtils;
 using OlameterFramework.OFramework.Utils;
@@ -48,7 +48,6 @@ namespace WFMS.WorkOrderExecution.Model.MappingConfigurations
                 .ForPath(x => x.WorkOrderName, y => y.MapFrom(z => z.Name));
 
             CreateMap<WorkOrderModel, WorkOrderModel>()
-                .ForMember(x => x.Id, y => y.Ignore())
                 .ForMember(x => x.JsonData, y => y.MapFrom((src, des, member) => ManualMappers.FormatPhoneNumber(ManualMappers.ExternalJsonUpdate(src.JsonData,des.JsonData))))
                 .ForMember(x => x.Versions, y => y.Ignore())
                 .ForMember(x => x.PositionSRID, y => y.Ignore())
