@@ -261,15 +261,6 @@ dotnet ef database update --project src/LocationSharing.Api --startup-project sr
 
 ### 6) POST `/api/trips/join`
 
-**Request (code-only):**
-
-```json
-{
-  "memberPublicId": "7f8fdab1-f786-4f2b-b50b-0dc0e0f5902d",
-  "code": "X8P4Q2ZW"
-}
-```
-
 **Success (200):**
 
 ```json

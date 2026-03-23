@@ -119,14 +119,46 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
                 "Member not found.");
         }
 
-        var normalizedCode = request.Code.Trim().ToUpperInvariant();
-        var trip = await dbContext.Trips.FirstOrDefaultAsync(t => t.Code == normalizedCode, cancellationToken);
+        Trip? trip = null;
+
+        if (request.TripPublicId.HasValue)
+        {
+            trip = await dbContext.Trips.FirstOrDefaultAsync(t => t.PublicId == request.TripPublicId.Value, cancellationToken);
+            if (trip is null)
+            {
+                return this.ProblemWithTrace(
+                    StatusCodes.Status404NotFound,
+                    "Not Found",
+                    "Trip not found.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.Code) && !string.Equals(trip.Code, request.Code.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return this.ProblemWithTrace(
+                    StatusCodes.Status404NotFound,
+                    "Not Found",
+                    "Join code not found for the specified trip.");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(request.Code))
+        {
+            var normalizedCode = request.Code.Trim().ToUpperInvariant();
+            trip = await dbContext.Trips.FirstOrDefaultAsync(t => t.Code == normalizedCode, cancellationToken);
+            if (trip is null)
+            {
+                return this.ProblemWithTrace(
+                    StatusCodes.Status404NotFound,
+                    "Not Found",
+                    "Join code not found.");
+            }
+        }
+
         if (trip is null)
         {
             return this.ProblemWithTrace(
                 StatusCodes.Status404NotFound,
                 "Not Found",
-                "Join code not found.");
+                "Trip not found.");
         }
 
         if (!TripRules.IsVisibleAndActive(trip, DateTimeOffset.UtcNow))
