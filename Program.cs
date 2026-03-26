@@ -14,6 +14,11 @@ builder.Services.AddValidation();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
+    if (builder.Environment.IsEnvironment("Testing"))
+    {
+        return;
+    }
+
     var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
         ?? throw new InvalidOperationException("Missing ConnectionStrings:DefaultConnection");
     options.UseNpgsql(connectionString);
@@ -89,3 +94,5 @@ api.MapUsageEndpoints();
 api.MapAdminEndpoints();
 
 app.Run();
+
+public partial class Program;
