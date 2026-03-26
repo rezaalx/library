@@ -1,1 +1,99 @@
-Hi
+# WhatsApp-like Call Usage API (.NET 10 Minimal API)
+
+Production-ready ASP.NET Core Minimal API backend for a WhatsApp-like Android app (without phone/email registration), with monthly call quota enforcement and admin adjustments.
+
+## Tech stack
+
+- .NET 10 / ASP.NET Core Minimal APIs
+- C# 14
+- EF Core (code-first) + PostgreSQL (Npgsql)
+- OpenAPI/Swagger in Development
+- Built-in rate limiting (partitioned by client IP) for public endpoints
+- ProblemDetails-based error responses
+
+## Features implemented
+
+- User registration by `DisplayName`, with server-generated unique 8-character code.
+- User lookup by code.
+- Contact add/list by user and code.
+- Call lifecycle endpoints: start, join, end.
+- Monthly usage tracking per user (`YYYYMM` in UTC).
+- Quota enforcement on call start.
+- Admin API key guard (`X-Admin-Key`) for limit updates and usage adjustments.
+- Transactional write operations for billing and adjustments.
+
+## Folder structure
+
+- `Domain/` entities and enum
+- `Data/` DbContext and fluent configurations
+- `Dtos/` request/response models
+- `Services/` quota and code generation logic
+- `Endpoints/` route-group mappings and handlers
+- `Security/` admin key helper
+
+## Endpoints
+
+### Public
+
+- `POST /api/users/register`
+- `GET /api/users/by-code/{code}`
+- `POST /api/contacts/add`
+- `GET /api/contacts/{ownerUserId}`
+
+### Calls
+
+- `POST /api/calls/start`
+- `POST /api/calls/{callId}/join`
+- `POST /api/calls/{callId}/end`
+
+### Usage
+
+- `GET /api/usage/{userId}/month/{yyyymm}`
+
+### Admin (requires `X-Admin-Key`)
+
+- `PATCH /api/admin/users/{userId}/limit`
+- `POST /api/admin/usage-adjustments`
+
+## Configuration
+
+`appsettings.json` example:
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=whatsapp_mvp;Username=postgres;Password=postgres"
+  },
+  "Admin": {
+    "ApiKey": "change-this-admin-key-in-production"
+  }
+}
+```
+
+## EF Core migrations (code-first)
+
+Install EF tool (if needed):
+
+```bash
+/workspace/.dotnet/dotnet tool install --global dotnet-ef
+```
+
+Create initial migration:
+
+```bash
+/workspace/.dotnet/dotnet ef migrations add InitialCreate
+```
+
+Apply migration:
+
+```bash
+/workspace/.dotnet/dotnet ef database update
+```
+
+## Run
+
+```bash
+/workspace/.dotnet/dotnet run
+```
+
+Swagger UI is enabled in Development.
