@@ -10,8 +10,6 @@ namespace Workspace.Endpoints;
 
 public static class AdminEndpoints
 {
-    private static readonly object _monthlyUsageLock = new();
-
     public static RouteGroupBuilder MapAdminEndpoints(this RouteGroupBuilder api)
     {
         var group = api.MapGroup("/admin").WithTags("Admin");
@@ -122,25 +120,10 @@ public static class AdminEndpoints
                 type: "user_not_found");
         }
 
-        if (!UsageEndpoints.IsValidMonth(request.MonthYYYYMM))
-        {
-            return Results.ValidationProblem(new Dictionary<string, string[]>
-            {
-                ["monthYYYYMM"] = ["Month must be in YYYYMM format with month 01-12."]
-            });
-        }
-
         await using var tx = await dbContext.Database.BeginTransactionAsync(ct);
         try
         {
-            MonthlyUsage usage;
-            lock (_monthlyUsageLock)
-            {
-                // Lightweight process-local lock avoids duplicate inserts before transaction commit.
-                usage = quotaService.GetOrCreateMonthlyUsage(request.UserId, request.MonthYYYYMM, ct)
-                    .GetAwaiter()
-                    .GetResult();
-            }
+            var usage = await quotaService.GetOrCreateMonthlyUsage(request.UserId, request.MonthYYYYMM, ct);
             usage.UsedSeconds += request.DeltaSeconds;
             usage.UpdatedAt = DateTime.UtcNow;
 

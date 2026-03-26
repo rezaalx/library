@@ -18,16 +18,17 @@ public sealed class QuotaService(AppDbContext dbContext)
             return usage;
         }
 
-        usage = new MonthlyUsage
-        {
-            UserId = userId,
-            MonthYYYYMM = monthYYYYMM,
-            UsedSeconds = 0,
-            UpdatedAt = DateTime.UtcNow
-        };
+        var nowUtc = DateTime.UtcNow;
+        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+            INSERT INTO monthly_usage ("UserId", "MonthYYYYMM", "UsedSeconds", "UpdatedAt")
+            VALUES ({userId}, {monthYYYYMM}, {0}, {nowUtc})
+            ON CONFLICT ("UserId", "MonthYYYYMM") DO NOTHING
+            """,
+            ct);
 
-        dbContext.MonthlyUsages.Add(usage);
-        return usage;
+        return await dbContext.MonthlyUsages
+            .FirstAsync(x => x.UserId == userId && x.MonthYYYYMM == monthYYYYMM, ct);
     }
 
     public async Task<int> CheckRemainingSeconds(Guid userId, DateTime utcNow, CancellationToken ct = default)
@@ -50,6 +51,7 @@ public sealed class QuotaService(AppDbContext dbContext)
 
     public async Task ApplyBilling(Guid billedUserId, int monthYYYYMM, int billedSeconds, CancellationToken ct = default)
     {
+        billedSeconds = Math.Max(0, billedSeconds);
         var usage = await GetOrCreateMonthlyUsage(billedUserId, monthYYYYMM, ct);
         usage.UsedSeconds += billedSeconds;
         usage.UpdatedAt = DateTime.UtcNow;
