@@ -1,1 +1,404 @@
-Hi
+# WhatsApp-Like Backend API (.NET 10, EF Core, PostgreSQL)
+
+Production-ready REST API backend for a WhatsApp-like Android app where:
+- users register with display name only;
+- server generates a unique 8-character code;
+- contacts are added by code;
+- monthly call usage quota is enforced (default 100 minutes/month).
+
+## Tech Stack
+
+- ASP.NET Core Web API (.NET 10)
+- EF Core code-first with PostgreSQL
+- Swagger / OpenAPI
+- Built-in rate limiting (partitioned per IP) on public endpoints
+- ProblemDetails error responses
+- Admin API key auth (`X-Admin-Key`)
+- Docker Compose (API + PostgreSQL)
+
+## Folder Structure
+
+```text
+Minit.Api/
+  Domain/        # Entities + enums
+  Data/          # DbContext + Fluent API configurations
+  Dtos/          # Request/response DTOs
+  Services/      # Quota logic, code generator, middleware, validation
+  Endpoints/     # Minimal API endpoint modules
+  Security/      # Admin API key config/filter
+  Program.cs
+```
+
+## Required Configuration
+
+See `Minit.Api/appsettings.json`:
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=minit_api;Username=postgres;Password=postgres"
+  },
+  "Admin": {
+    "ApiKey": "replace-with-a-strong-admin-key"
+  }
+}
+```
+
+## Run with Docker Compose
+
+From repository root:
+
+```bash
+docker compose up --build
+```
+
+- API: `http://localhost:8080`
+- Swagger UI: `http://localhost:8080/swagger`
+- PostgreSQL: `localhost:5432`
+
+## Local Run (without Docker)
+
+1. Ensure PostgreSQL is running and connection string is set in `appsettings.Development.json`.
+2. Restore/build:
+   ```bash
+   dotnet restore
+   dotnet build
+   ```
+3. Run migrations + start app:
+   ```bash
+   dotnet ef migrations add InitialCreate --project Minit.Api --startup-project Minit.Api
+   dotnet ef database update --project Minit.Api --startup-project Minit.Api
+   dotnet run --project Minit.Api
+   ```
+
+## EF Core Migrations Notes
+
+- Migrations folder is intentionally not checked in here because this environment cannot run `dotnet` CLI.
+- The schema is fully migration-ready through:
+  - `AppDbContext`
+  - `Data/EntityConfigurations/*`
+
+Generate/update migrations with:
+
+```bash
+dotnet ef migrations add <MigrationName> --project Minit.Api --startup-project Minit.Api
+dotnet ef database update --project Minit.Api --startup-project Minit.Api
+```
+
+## Implemented Endpoints
+
+### Public Users
+- `POST /api/users/register`
+- `GET /api/users/by-code/{code}`
+
+### Contacts
+- `POST /api/contacts/add`
+- `GET /api/contacts/{ownerUserId}`
+
+### Calls
+- `POST /api/calls/start`
+- `POST /api/calls/{callId}/join`
+- `POST /api/calls/{callId}/end`
+
+### Usage
+- `GET /api/usage/{userId}/month/{yyyymm}`
+
+### Admin (`X-Admin-Key` required)
+- `PATCH /api/admin/users/{userId}/limit`
+- `POST /api/admin/usage-adjustments`
+
+## Behavior Highlights
+
+- Register:
+  - secure RNG generates 8-char code;
+  - retries on collision.
+- Add contact:
+  - by code;
+  - disallow self;
+  - prevent duplicates.
+- Quota:
+  - remaining = `MonthlyLimitSeconds - MonthlyUsage.UsedSeconds` for current UTC month.
+  - start call denied with 403 + `quota_exceeded` when remaining <= 0.
+- End call:
+  - marks ended;
+  - bills full call duration to creator only (MVP rule);
+  - applies usage update transactionally.
+- Admin:
+  - update monthly limit using minutes or seconds;
+  - apply usage adjustments transactionally.
+
+## Sample API Responses
+
+### 1) POST `/api/users/register`
+
+Success (201):
+
+```json
+{
+  "UserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "DisplayName": "Alice",
+  "Code": "K7Q2M8NZ",
+  "MonthlyLimitSeconds": 6000,
+  "CreatedAtUtc": "2026-03-27T10:25:41.122Z"
+}
+```
+
+Error (400):
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "DisplayName": [
+      "The field DisplayName must be a string with a minimum length of 1 and a maximum length of 80."
+    ]
+  },
+  "traceId": "00-4f7ad4e7f4389947d63f07f4893cc6e4-b8f81f03bca7f9a8-00"
+}
+```
+
+### 2) GET `/api/users/by-code/{code}`
+
+Success (200):
+
+```json
+{
+  "UserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "DisplayName": "Alice"
+}
+```
+
+Error (404):
+
+```json
+{
+  "type": "about:blank",
+  "title": "User not found",
+  "status": 404,
+  "detail": "No active user found for the provided code.",
+  "errorCode": "user_not_found",
+  "traceId": "00-2a5f03ef6f5a4d7f2d2528f9c8b65b91-a0417d7e36fb7336-00"
+}
+```
+
+### 3) POST `/api/contacts/add`
+
+Success (201):
+
+```json
+{
+  "ContactId": "80ca84a1-18d7-44de-8e39-2f7728e73f67",
+  "OwnerUserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "ContactUserId": "0c8c9345-7ea5-4894-a4ff-3d309f9ca8bc",
+  "DisplayName": "Bob",
+  "CreatedAtUtc": "2026-03-27T10:31:02.947Z"
+}
+```
+
+Error (409):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Contact already exists",
+  "status": 409,
+  "detail": "This contact is already in the owner's contact list.",
+  "errorCode": "contact_exists",
+  "traceId": "00-20f34e404260fd79f9c0300303b7caeb-8ff83809af6efd33-00"
+}
+```
+
+### 4) GET `/api/contacts/{ownerUserId}`
+
+Success (200):
+
+```json
+[
+  {
+    "ContactUserId": "0c8c9345-7ea5-4894-a4ff-3d309f9ca8bc",
+    "DisplayName": "Bob",
+    "Code": "F5Z1K2QR",
+    "AddedAtUtc": "2026-03-27T10:31:02.947Z"
+  }
+]
+```
+
+Error (404):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Owner not found",
+  "status": 404,
+  "detail": "Owner user does not exist or is inactive.",
+  "errorCode": "owner_not_found",
+  "traceId": "00-d11eb06a2a9a4518dc7e4c47a6f87eb6-e7f5f2f5b92bc9ad-00"
+}
+```
+
+### 5) POST `/api/calls/start`
+
+Success (201):
+
+```json
+{
+  "CallId": "0c4dc5ce-6cc6-4a54-9ca6-ed69431c8ec8",
+  "CreatedByUserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "CalleeUserId": "0c8c9345-7ea5-4894-a4ff-3d309f9ca8bc",
+  "Provider": "agora",
+  "ProviderRoomId": "room-123",
+  "Status": "Active",
+  "StartedAtUtc": "2026-03-27T10:33:11.316Z",
+  "RemainingSecondsBeforeStart": 6000
+}
+```
+
+Error (403):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Quota exceeded",
+  "status": 403,
+  "detail": "No remaining monthly call seconds.",
+  "errorCode": "quota_exceeded",
+  "traceId": "00-c16f5c6d2c7e40999b9f64017af66ce7-38a8f301bd155e8a-00"
+}
+```
+
+### 6) POST `/api/calls/{callId}/join`
+
+Success (200):
+
+```json
+{
+  "ParticipantId": "d4f8f983-6a43-458e-9433-f5e1be7cca3e",
+  "CallSessionId": "0c4dc5ce-6cc6-4a54-9ca6-ed69431c8ec8",
+  "UserId": "0c8c9345-7ea5-4894-a4ff-3d309f9ca8bc",
+  "JoinedAtUtc": "2026-03-27T10:33:21.901Z"
+}
+```
+
+Error (404):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Call not found",
+  "status": 404,
+  "detail": "Call session was not found.",
+  "errorCode": "call_not_found",
+  "traceId": "00-a8f88e4b2d167d3f3abfb06fa414a364-2d3478f039b4f2b8-00"
+}
+```
+
+### 7) POST `/api/calls/{callId}/end`
+
+Success (200):
+
+```json
+{
+  "CallId": "0c4dc5ce-6cc6-4a54-9ca6-ed69431c8ec8",
+  "Status": "Ended",
+  "EndedAtUtc": "2026-03-27T10:40:12.310Z",
+  "BilledSecondsCreator": 421,
+  "BilledUserId": "77f9e38e-8477-4df0-b91a-3605af4549de"
+}
+```
+
+Error (404):
+
+```json
+{
+  "type": "about:blank",
+  "title": "User not found",
+  "status": 404,
+  "detail": "EndedBy user does not exist or is inactive.",
+  "errorCode": "user_not_found",
+  "traceId": "00-7abceeb86b56595c8e9c67f0f4fbe4ce-7b660734ee66978d-00"
+}
+```
+
+### 8) GET `/api/usage/{userId}/month/{yyyymm}`
+
+Success (200):
+
+```json
+{
+  "UserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "MonthYYYYMM": 202603,
+  "MonthlyLimitSeconds": 6000,
+  "UsedSeconds": 421,
+  "RemainingSeconds": 5579,
+  "UpdatedAtUtc": "2026-03-27T10:40:12.315Z"
+}
+```
+
+Error (400):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Invalid month",
+  "status": 400,
+  "detail": "MonthYYYYMM is invalid.",
+  "errorCode": "invalid_month",
+  "traceId": "00-bf9c68f9b41a177f97098ed17f834f0c-17d6f9db12f4a6c8-00"
+}
+```
+
+### 9) PATCH `/api/admin/users/{userId}/limit`
+
+Success (200):
+
+```json
+{
+  "UserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "MonthlyLimitSeconds": 7200,
+  "MonthlyLimitMinutes": 120
+}
+```
+
+Error (401):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "Invalid admin API key.",
+  "errorCode": "admin_key_invalid",
+  "traceId": "00-30ba38b41459ec0806e1f5ef0f4f3aa3-c24a8cd29e95f8de-00"
+}
+```
+
+### 10) POST `/api/admin/usage-adjustments`
+
+Success (201):
+
+```json
+{
+  "Id": "7a2e95f0-dbd4-495a-9f39-0424a6d65f0b",
+  "UserId": "77f9e38e-8477-4df0-b91a-3605af4549de",
+  "MonthYYYYMM": 202603,
+  "DeltaSeconds": -120,
+  "Reason": "Manual correction",
+  "CreatedAtUtc": "2026-03-27T10:42:00.777Z",
+  "NewUsedSeconds": 301
+}
+```
+
+Error (400):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Invalid month",
+  "status": 400,
+  "detail": "MonthYYYYMM is invalid.",
+  "errorCode": "invalid_month",
+  "traceId": "00-728fd0ea6f79db72171f32c5b5427305-30ea4cd60c56f53d-00"
+}
+```
