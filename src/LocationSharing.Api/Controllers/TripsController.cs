@@ -102,6 +102,31 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
         return Ok(ToTripResponse(trip));
     }
 
+    [HttpPost("{tripPublicId:guid}/status")]
+    [ProducesResponseType(typeof(TripResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ValidationErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetTripStatus(
+        [FromRoute] Guid tripPublicId,
+        [FromBody] SetTripStatusRequest request,
+        CancellationToken cancellationToken)
+    {
+        var trip = await dbContext.Trips.FirstOrDefaultAsync(t => t.PublicId == tripPublicId, cancellationToken);
+        if (trip is null)
+        {
+            return this.ProblemWithTrace(
+                StatusCodes.Status404NotFound,
+                "Not Found",
+                "Trip not found.");
+        }
+
+        trip.IsActive = request.IsActive!.Value;
+        trip.UpdatedOn = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(ToTripResponse(trip));
+    }
+
     [HttpPost("join")]
     [ProducesResponseType(typeof(TripMemberResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ValidationErrorResponse), StatusCodes.Status400BadRequest)]
