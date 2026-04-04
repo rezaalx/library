@@ -1,9 +1,13 @@
 using System.ComponentModel.DataAnnotations;
+using LocationSharing.Api.Contracts.Validation;
 
 namespace LocationSharing.Api.Contracts.Requests;
 
 public class CreateTripRequest : IValidatableObject
 {
+    [NotEmptyGuid]
+    public Guid MemberPublicId { get; set; }
+
     [Required]
     [MaxLength(200)]
     public string Name { get; set; } = string.Empty;

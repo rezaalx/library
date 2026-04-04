@@ -35,6 +35,11 @@ public class LocationSharingDbContext(DbContextOptions<LocationSharingDbContext>
             entity.Property(x => x.Title).HasMaxLength(200);
             entity.Property(x => x.Code).HasMaxLength(16).IsRequired();
             entity.Property(x => x.Description).HasMaxLength(4000);
+
+            entity.HasOne(x => x.CreatedByMember)
+                .WithMany()
+                .HasForeignKey(x => x.CreatedByMemberId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<TripMember>(entity =>
