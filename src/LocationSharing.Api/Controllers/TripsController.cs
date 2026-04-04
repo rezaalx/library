@@ -17,9 +17,19 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
     [HttpPost]
     [ProducesResponseType(typeof(TripResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ValidationErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> CreateTrip([FromBody] CreateTripRequest request, CancellationToken cancellationToken)
     {
+        var member = await dbContext.Members.FirstOrDefaultAsync(m => m.PublicId == request.MemberPublicId, cancellationToken);
+        if (member is null)
+        {
+            return this.ProblemWithTrace(
+                StatusCodes.Status404NotFound,
+                "Not Found",
+                "Member not found.");
+        }
+
         var code = await GenerateUniqueCodeAsync(cancellationToken);
         if (code is null)
         {
@@ -33,6 +43,8 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
         var trip = new Trip
         {
             PublicId = Guid.NewGuid(),
+            CreatedByMemberId = member.Id,
+            CreatedByMember = member,
             Name = request.Name.Trim(),
             Title = request.Title?.Trim(),
             StartTime = request.StartTime,
