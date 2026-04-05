@@ -81,6 +81,47 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
         return Ok(ToTripResponse(trip));
     }
 
+    [HttpGet("by-member/{memberPublicId}")]
+    [ProducesResponseType(typeof(IEnumerable<TripResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ValidationErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetTripsByMemberPublicId([FromRoute] string memberPublicId, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(memberPublicId, out var parsedMemberPublicId))
+        {
+            return BadRequest(new ValidationErrorResponse
+            {
+                Message = "The request is invalid.",
+                Errors = new Dictionary<string, string[]>
+                {
+                    ["memberPublicId"] = ["The memberPublicId must be a valid GUID."]
+                }
+            });
+        }
+
+        var member = await dbContext.Members
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.PublicId == parsedMemberPublicId, cancellationToken);
+        if (member is null)
+        {
+            return this.ProblemWithTrace(
+                StatusCodes.Status404NotFound,
+                "Not Found",
+                "Member not found.");
+        }
+
+        var trips = await (
+            from tripMember in dbContext.TripMembers.AsNoTracking()
+            join trip in dbContext.Trips.AsNoTracking()
+                on tripMember.TripId equals trip.Id
+            where tripMember.MemberId == member.Id
+            select trip)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        return Ok(trips.Select(ToTripResponse));
+    }
+
     [HttpPost("{tripPublicId:guid}/end")]
     [ProducesResponseType(typeof(TripResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
