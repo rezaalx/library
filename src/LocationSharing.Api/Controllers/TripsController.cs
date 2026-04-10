@@ -124,8 +124,12 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
 
     [HttpPost("{tripPublicId:guid}/end")]
     [ProducesResponseType(typeof(TripResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ValidationErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> EndTrip([FromRoute] Guid tripPublicId, CancellationToken cancellationToken)
+    public async Task<IActionResult> EndTrip(
+        [FromRoute] Guid tripPublicId,
+        [FromBody] EndTripRequest? request,
+        CancellationToken cancellationToken)
     {
         var trip = await dbContext.Trips.FirstOrDefaultAsync(t => t.PublicId == tripPublicId, cancellationToken);
         if (trip is null)
@@ -136,8 +140,25 @@ public class TripsController(LocationSharingDbContext dbContext) : ControllerBas
                 "Trip not found.");
         }
 
+        var now = DateTimeOffset.UtcNow;
+        var hasEndedAlready = !trip.IsActive;
+
+        if (request?.EndLatitude.HasValue == true && request.EndLongitude.HasValue)
+        {
+            if (!hasEndedAlready || !trip.EndLatitude.HasValue || !trip.EndLongitude.HasValue)
+            {
+                trip.EndLatitude = request.EndLatitude.Value;
+                trip.EndLongitude = request.EndLongitude.Value;
+            }
+        }
+
         trip.IsActive = false;
-        trip.UpdatedOn = DateTimeOffset.UtcNow;
+        if (trip.EndTime == default || trip.EndTime > now)
+        {
+            trip.EndTime = now;
+        }
+
+        trip.UpdatedOn = now;
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return Ok(ToTripResponse(trip));
