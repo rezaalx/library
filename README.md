@@ -225,6 +225,20 @@ dotnet ef database update --project src/LocationSharing.Api --startup-project sr
 
 ### 5) POST `/api/trips/{tripPublicId}/end`
 
+**Request body (optional for backward compatibility):**
+
+```json
+{
+  "endLatitude": 25.2048,
+  "endLongitude": 55.2708
+}
+```
+
+Both `endLatitude` and `endLongitude` are optional. Older clients can continue calling the endpoint without a request body.
+If provided, both fields must be provided together and must be valid coordinates:
+- `endLatitude`: `-90` to `90`
+- `endLongitude`: `-180` to `180`
+
 **Success (200):**
 
 ```json
